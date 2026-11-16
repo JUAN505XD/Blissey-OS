@@ -1,19 +1,20 @@
-"""Pruebas unitarias y de requisitos medibles (RP1, RP2, RP3) para Prototipo 1."""
+"""Pruebas unitarias y de requisitos medibles (RP1, RP2, RP3) para Blissey OS (Urgencias)."""
 
 import json
 
 from minidc import archivos, consola, disco, kernel, memoria, procesos, sincronizacion
 
 
-def test_importaciones_y_ciclo_basico():
+def test_ciclo_7_pasos_atencion_urgencia():
+    """Verifica el flujo completo de admisión, ejecución de CPU, E/S y alta."""
     kernel.iniciar_sistema({"num_cpus": 1})
     assert kernel.reloj_actual() == 0
 
     pid = procesos.crear_proceso(
-        nombre="web",
-        usuario="cliente_a",
+        nombre="urgencia_vital",
+        usuario="medico_a",
         programa=[["CPU", 2], ["ES", 10], ["CPU", 1]],
-        prioridad=1,
+        prioridad=2,
     )
     assert procesos.estado_proceso(pid) == "LISTO"
 
@@ -23,15 +24,21 @@ def test_importaciones_y_ciclo_basico():
     assert resumen["procesos_activos"] == 0
 
 
-def test_rp1_respuesta_servicios_web_menor_igual_10_ticks(tmp_path):
-    """RP1: Servicios web empiezan a ejecutarse en promedio dentro de 10 ticks."""
+def test_rp1_respuesta_urgencias_menor_igual_10_ticks(tmp_path):
+    """RP1: Atenciones urgentes / web inician en promedio dentro de 10 ticks desde su llegada."""
     escenario = {
-        "config": {"num_cpus": 1, "marcos_fisicos": 16, "tam_pagina": 256,
-                   "bloques_disco": 200, "tam_bloque": 512, "cache_bloques": 8},
-        "usuarios": ["cliente_a", "cliente_b"],
-        "semaforos": {"bd": 1},
+        "config": {
+            "num_cpus": 1,
+            "marcos_fisicos": 16,
+            "tam_pagina": 256,
+            "bloques_disco": 200,
+            "tam_bloque": 512,
+            "cache_bloques": 8,
+        },
+        "usuarios": ["medico_a", "enfermeria_b"],
+        "semaforos": {"historia_clinica": 1},
         "catalogo": {
-            "analitica": {
+            "observacion_larga": {
                 "memoria_bytes": 4096,
                 "cuota_marcos": 6,
                 "prioridad": 0,
@@ -45,13 +52,13 @@ def test_rp1_respuesta_servicios_web_menor_igual_10_ticks(tmp_path):
             },
         },
         "llegadas": [
-            {"tick": 0, "programa": "analitica", "usuario": "cliente_b"},
-            {"tick": 3, "programa": "web", "usuario": "cliente_a"},
-            {"tick": 8, "programa": "web", "usuario": "cliente_a"},
-            {"tick": 14, "programa": "web", "usuario": "cliente_a"},
+            {"tick": 0, "programa": "observacion_larga", "usuario": "enfermeria_b"},
+            {"tick": 3, "programa": "web", "usuario": "medico_a"},
+            {"tick": 8, "programa": "web", "usuario": "medico_a"},
+            {"tick": 14, "programa": "web", "usuario": "medico_a"},
         ],
     }
-    ruta = tmp_path / "escenario_base.json"
+    ruta = tmp_path / "escenario_urgencias.json"
     ruta.write_text(json.dumps(escenario), encoding="utf-8")
 
     kernel.cargar_escenario(str(ruta))
@@ -61,14 +68,13 @@ def test_rp1_respuesta_servicios_web_menor_igual_10_ticks(tmp_path):
     assert metricas["respuesta_promedio"] <= 10.0
 
 
-def test_rp2_sin_inanicion_menor_150_ticks():
-    """RP2: Ningún proceso espera más de 150 ticks consecutivos en cola de listos."""
+def test_rp2_sin_inanicion_envejecimiento_menor_150_ticks():
+    """RP2: Ningún paciente/proceso espera más de 150 ticks consecutivos en cola de listos."""
     kernel.iniciar_sistema({"num_cpus": 1})
 
-    # Proceso de baja prioridad llega primero y compite contra ráfagas continuas de alta prioridad
-    pid_lento = procesos.crear_proceso(
-        nombre="analitica_pesada",
-        usuario="cliente_b",
+    pid_consulta = procesos.crear_proceso(
+        nombre="consulta_general",
+        usuario="enfermeria_b",
         programa=[["CPU", 5]],
         prioridad=0,
     )
@@ -76,8 +82,8 @@ def test_rp2_sin_inanicion_menor_150_ticks():
     for tick_actual in range(220):
         if tick_actual % 2 == 0:
             procesos.crear_proceso(
-                nombre="web_rafaga",
-                usuario="cliente_a",
+                nombre="triage_rojo",
+                usuario="medico_a",
                 programa=[["CPU", 2]],
                 prioridad=3,
             )
@@ -85,17 +91,17 @@ def test_rp2_sin_inanicion_menor_150_ticks():
 
     metricas = procesos.metricas_planificacion()
     assert metricas["espera_maxima"] < 150
-    assert procesos.estado_proceso(pid_lento) == "TERMINADO"
+    assert procesos.estado_proceso(pid_consulta) == "TERMINADO"
 
 
 def test_rp3_utilizacion_cpu_mayor_igual_85_por_ciento():
-    """RP3: Con carga suficiente, la utilización de CPU es de al menos 85%."""
+    """RP3: Con carga suficiente en urgencias, la utilización de CPU es de al menos 85%."""
     kernel.iniciar_sistema({"num_cpus": 2})
 
     for i in range(6):
         procesos.crear_proceso(
-            nombre=f"batch_{i}",
-            usuario="cliente_a",
+            nombre=f"atencion_{i}",
+            usuario="medico_a",
             programa=[["CPU", 30]],
             prioridad=1,
         )
@@ -105,13 +111,18 @@ def test_rp3_utilizacion_cpu_mayor_igual_85_por_ciento():
     assert metricas["utilizacion_cpu"] >= 0.85
 
 
-def test_consola_comandos_prototipo1(tmp_path):
-    """Verifica ps, run, kill, tick, top y formato de errores en consola."""
+def test_consola_admision_directorios_y_monitoreo(tmp_path):
+    """Verifica admitir/run, ps, kill, tick, top, directorios independientes y errores."""
     escenario = {
         "config": {"num_cpus": 1},
-        "usuarios": ["cliente_a"],
+        "usuarios": ["medico_a"],
         "catalogo": {
-            "web": {"memoria_bytes": 1024, "cuota_marcos": 2, "prioridad": 1, "programa": [["CPU", 10]]}
+            "triage_rojo": {
+                "memoria_bytes": 1024,
+                "cuota_marcos": 2,
+                "prioridad": 2,
+                "programa": [["CPU", 10]],
+            }
         },
         "llegadas": [],
     }
@@ -119,18 +130,21 @@ def test_consola_comandos_prototipo1(tmp_path):
     ruta.write_text(json.dumps(escenario), encoding="utf-8")
     kernel.cargar_escenario(str(ruta))
 
-    salida_run = consola.ejecutar_comando("run web", usuario="cliente_a")
-    assert "PID 1" in salida_run
+    assert consola.directorio_actual("admin") == "/"
+    assert consola.directorio_actual("medico_a") == "/home/medico_a"
+
+    salida_adm = consola.ejecutar_comando("admitir triage_rojo", usuario="medico_a")
+    assert "PID 1" in salida_adm
 
     salida_ps = consola.ejecutar_comando("ps")
     assert salida_ps.startswith("PID NOMBRE USUARIO ESTADO")
-    assert "1 web cliente_a LISTO" in salida_ps
+    assert "1 triage_rojo medico_a LISTO" in salida_ps
 
     salida_tick = consola.ejecutar_comando("tick 3")
     assert "tick 3" in salida_tick
 
     salida_top = consola.ejecutar_comando("top")
-    assert "Utilización CPU:" in salida_top
+    assert "Blissey OS Urgencias" in salida_top
 
     salida_kill = consola.ejecutar_comando("kill 1")
     assert "terminado" in salida_kill

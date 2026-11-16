@@ -1,4 +1,4 @@
-"""Núcleo y reloj discreto del sistema operativo simulado NimbusDC."""
+"""Núcleo y reloj discreto de Blissey OS (Gestión de Urgencias Hospitalarias)."""
 
 from __future__ import annotations
 
@@ -22,11 +22,13 @@ _config_actual: dict = dict(_CONFIG_DEFECTO)
 _catalogo_escenario: dict[str, dict] = {}
 _llegadas_programadas: dict[int, list[dict]] = {}
 _sistema_iniciado: bool = False
+_ultimo_resumen_metricas: dict = {}
 
 
 def iniciar_sistema(config: dict) -> None:
-    """Inicializa o reinicia por completo el estado de todos los módulos del sistema."""
-    global _reloj, _config_actual, _catalogo_escenario, _llegadas_programadas, _sistema_iniciado
+    """Inicializa o reinicia por completo todos los módulos del hospital simulado."""
+    global _reloj, _config_actual, _catalogo_escenario, _llegadas_programadas
+    global _sistema_iniciado, _ultimo_resumen_metricas
 
     cfg = dict(_CONFIG_DEFECTO)
     if config:
@@ -37,6 +39,7 @@ def iniciar_sistema(config: dict) -> None:
     _catalogo_escenario = {}
     _llegadas_programadas = {}
     _sistema_iniciado = True
+    _ultimo_resumen_metricas = {}
 
     procesos._reiniciar_modulo(num_cpus=int(cfg["num_cpus"]))
     memoria._reiniciar_modulo(
@@ -54,7 +57,7 @@ def iniciar_sistema(config: dict) -> None:
 
 
 def _procesar_llegadas_hasta(tick_objetivo: int) -> None:
-    """Admite los procesos programados en el escenario cuya llegada sea <= tick_objetivo."""
+    """Admite los pacientes/procesos programados cuya llegada sea <= tick_objetivo."""
     tickets_pendientes = [t for t in sorted(_llegadas_programadas.keys()) if t <= tick_objetivo]
     for t in tickets_pendientes:
         eventos = _llegadas_programadas.pop(t)
@@ -65,9 +68,9 @@ def _procesar_llegadas_hasta(tick_objetivo: int) -> None:
 
 
 def ejecutar_desde_catalogo(nombre_programa: str, usuario: str = "admin") -> int:
-    """Instancia un proceso tomando su definición del catálogo cargado en el escenario."""
+    """Admite un nuevo paciente/proceso tomando su protocolo del catálogo del escenario."""
     if nombre_programa not in _catalogo_escenario:
-        raise ErrorNoExiste(f"El programa '{nombre_programa}' no existe en el catálogo.")
+        raise ErrorNoExiste(f"El protocolo de atención '{nombre_programa}' no existe en el catálogo.")
 
     spec = _catalogo_escenario[nombre_programa]
     memoria_bytes = int(spec.get("memoria_bytes", spec.get("memoria bytes", 4096)))
@@ -86,7 +89,7 @@ def ejecutar_desde_catalogo(nombre_programa: str, usuario: str = "admin") -> int
 
 
 def cargar_escenario(ruta_json: str) -> None:
-    """Carga un archivo JSON de escenario, reinicia el kernel y programa las llegadas."""
+    """Carga un escenario hospitalario desde JSON, inicia el sistema y programa ingresos."""
     global _catalogo_escenario, _llegadas_programadas
 
     ruta = Path(ruta_json)
@@ -101,6 +104,7 @@ def cargar_escenario(ruta_json: str) -> None:
     for usuario in datos.get("usuarios", []):
         if usuario != "admin":
             archivos.crear_usuario(usuario)
+            consola._registrar_directorio_usuario(usuario)
 
     for nombre_sem, valor in datos.get("semaforos", {}).items():
         sincronizacion.crear_semaforo(nombre_sem, int(valor))
@@ -111,29 +115,38 @@ def cargar_escenario(ruta_json: str) -> None:
         t = int(llegada["tick"])
         _llegadas_programadas.setdefault(t, []).append(dict(llegada))
 
-    # Admitir procesos programados en tick 0 desde la carga inicial
     _procesar_llegadas_hasta(0)
 
 
 def tick() -> None:
-    """Avanza el reloj discreto en 1 unidad y ejecuta el ciclo determinista del kernel."""
-    global _reloj
+    """Ejecuta el ciclo determinista de 7 pasos de Aurora / Blissey OS."""
+    global _reloj, _ultimo_resumen_metricas
 
     if not _sistema_iniciado:
         iniciar_sistema({})
 
-    # 1. Avance del reloj
+    # Paso 1. Reloj: avanza una unidad de tiempo
     _reloj += 1
     procesos._sincronizar_reloj(_reloj)
 
-    # 2. Llegada de procesos programados en el escenario
+    # Paso 2. Llegadas: incorpora los nuevos pacientes/procesos programados
     _procesar_llegadas_hasta(_reloj)
 
-    # 3. Atención de E/S terminada y desbloqueos (interrupciones)
+    # Paso 3. E/S terminada: completa solicitudes de disco/memoria y despierta bloqueados
     procesos.procesar_interrupciones_bloqueo()
 
-    # 4. Planificación y ejecución de 1 tick por cada CPU
-    procesos.ejecutar_ciclo_cpus(_reloj)
+    # Paso 4. Planificador: selecciona y despacha el siguiente proceso según urgencia
+    procesos.planificar_cpus(_reloj)
+
+    # Paso 5. Ejecución: ejecuta 1 tick de CPU, E/S o acceso a memoria
+    procesos.ejecutar_instrucciones_cpus(_reloj)
+
+    # Paso 6. Vigilancia: detecta interbloqueos y aplica envejecimiento de prioridades
+    sincronizacion.detectar_interbloqueo()
+    procesos.aplicar_vigilancia()
+
+    # Paso 7. Métricas: actualiza los tiempos, contadores e indicadores del sistema
+    _ultimo_resumen_metricas = procesos.metricas_planificacion()
 
 
 def ejecutar_ticks(n: int) -> None:
@@ -150,7 +163,7 @@ def reloj_actual() -> int:
 
 
 def resumen_sistema() -> dict:
-    """Devuelve un resumen instantáneo del estado global del servidor simulado."""
+    """Devuelve un resumen instantáneo del estado de urgencias y recursos del sistema."""
     estado_mem = memoria.estado_memoria()
     estado_fs = archivos.fs_estado_disco()
     return {
@@ -162,7 +175,7 @@ def resumen_sistema() -> dict:
 
 
 def apagar_sistema() -> dict:
-    """Genera el resumen final de ejecución y detiene la simulación activa."""
+    """Genera el resumen final de la jornada y detiene la simulación activa."""
     global _sistema_iniciado
     resumen = resumen_sistema()
     resumen["metricas_planificacion"] = procesos.metricas_planificacion()

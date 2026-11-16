@@ -1,10 +1,10 @@
-"""Intérprete de comandos de administración para NimbusDC."""
+"""Intérprete de comandos de administración de urgencias para Blissey OS."""
 
 from __future__ import annotations
 
 import shlex
 
-from . import archivos, disco, kernel, memoria, procesos
+from . import archivos, kernel, memoria, procesos
 from .errores import ErrorNoExiste, ErrorSistema
 
 _directorios_usuario: dict[str, str] = {"admin": "/"}
@@ -12,15 +12,22 @@ _historiales_usuario: dict[str, list[str]] = {"admin": []}
 
 
 def _reiniciar_modulo() -> None:
-    """Reinicia directorios actuales e historiales de comandos."""
+    """Reinicia directorios independientes por usuario e historiales de comandos."""
     global _directorios_usuario, _historiales_usuario
     _directorios_usuario = {"admin": "/"}
     _historiales_usuario = {"admin": []}
 
 
+def _registrar_directorio_usuario(usuario: str) -> str:
+    """Asigna una ubicación independiente para cada usuario del hospital."""
+    if usuario not in _directorios_usuario:
+        _directorios_usuario[usuario] = "/" if usuario == "admin" else f"/home/{usuario}"
+    return _directorios_usuario[usuario]
+
+
 def directorio_actual(usuario: str = "admin") -> str:
     """Devuelve el directorio de trabajo actual del usuario."""
-    return _directorios_usuario.setdefault(usuario, "/")
+    return _registrar_directorio_usuario(usuario)
 
 
 def historial(usuario: str = "admin") -> list:
@@ -29,7 +36,7 @@ def historial(usuario: str = "admin") -> list:
 
 
 def _formatear_ps() -> str:
-    """Formatea la tabla de procesos comenzando con la cabecera obligatoria."""
+    """Formatea la tabla de procesos/pacientes comenzando con la cabecera obligatoria."""
     lineas = ["PID NOMBRE USUARIO ESTADO PRIORIDAD CPU_USADA ESPERA"]
     for p in procesos.listar_procesos():
         lineas.append(
@@ -40,13 +47,13 @@ def _formatear_ps() -> str:
 
 
 def _formatear_top() -> str:
-    """Construye una instantánea completa del estado de CPU y procesos."""
+    """Construye una instantánea del monitor de urgencias y utilización de recursos."""
     res = kernel.resumen_sistema()
     met = procesos.metricas_planificacion()
     encabezado = (
-        f"NimbusDC TOP | Reloj: {res['reloj']} | "
-        f"Activos: {res['procesos_activos']} | "
-        f"Terminados: {met['procesos_terminados']} | "
+        f"Blissey OS Urgencias | Reloj: {res['reloj']} | "
+        f"En atención/espera: {res['procesos_activos']} | "
+        f"Atendidos (alta): {met['procesos_terminados']} | "
         f"Utilización CPU: {met['utilizacion_cpu'] * 100:.1f}% | "
         f"Respuesta prom: {met['respuesta_promedio']:.2f} | "
         f"Espera máx: {met['espera_maxima']}"
@@ -57,6 +64,7 @@ def _formatear_top() -> str:
 def ejecutar_comando(linea: str, usuario: str = "admin") -> str:
     """Ejecuta un comando de consola y captura excepciones devolviendo texto con prefijo Error:."""
     texto = linea.strip()
+    _registrar_directorio_usuario(usuario)
     _historiales_usuario.setdefault(usuario, []).append(texto)
 
     if not texto:
@@ -70,11 +78,11 @@ def ejecutar_comando(linea: str, usuario: str = "admin") -> str:
         if cmd in ("ps", "tasklist"):
             return _formatear_ps()
 
-        if cmd == "run":
+        if cmd in ("run", "admitir"):
             if len(args) != 1:
-                raise ErrorSistema("Uso: run NOMBRE")
+                raise ErrorSistema(f"Uso: {cmd} NOMBRE")
             pid = kernel.ejecutar_desde_catalogo(args[0], usuario=usuario)
-            return f"Proceso '{args[0]}' iniciado con PID {pid}."
+            return f"Admisión '{args[0]}' registrada con PID {pid}."
 
         if cmd in ("kill", "taskkill"):
             if len(args) != 1:

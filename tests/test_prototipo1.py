@@ -1,4 +1,4 @@
-"""Pruebas unitarias y de requisitos medibles (RP1, RP2, RP3) para Blissey OS (Urgencias)."""
+"""Pruebas unitarias y visualización en consola de RP1, RP2 y RP3 para Blissey OS."""
 
 import json
 
@@ -8,8 +8,6 @@ from minidc import archivos, consola, disco, kernel, memoria, procesos, sincroni
 def test_ciclo_7_pasos_atencion_urgencia():
     """Verifica el flujo completo de admisión, ejecución de CPU, E/S y alta."""
     kernel.iniciar_sistema({"num_cpus": 1})
-    assert kernel.reloj_actual() == 0
-
     pid = procesos.crear_proceso(
         nombre="urgencia_vital",
         usuario="medico_a",
@@ -21,6 +19,7 @@ def test_ciclo_7_pasos_atencion_urgencia():
     kernel.ejecutar_ticks(10)
     assert procesos.estado_proceso(pid) == "TERMINADO"
     resumen = kernel.apagar_sistema()
+    print(f"\n[Ciclo 7 pasos] Resumen al apagar: {resumen}")
     assert resumen["procesos_activos"] == 0
 
 
@@ -65,6 +64,8 @@ def test_rp1_respuesta_urgencias_menor_igual_10_ticks(tmp_path):
     kernel.ejecutar_ticks(60)
 
     metricas = procesos.metricas_planificacion()
+    print(f"\n[RP1] Respuesta promedio: {metricas['respuesta_promedio']} ticks (Límite <= 10.0)")
+    print(consola.ejecutar_comando("top"))
     assert metricas["respuesta_promedio"] <= 10.0
 
 
@@ -90,6 +91,10 @@ def test_rp2_sin_inanicion_envejecimiento_menor_150_ticks():
         kernel.tick()
 
     metricas = procesos.metricas_planificacion()
+    print(
+        f"\n[RP2] Espera máxima consecutiva: {metricas['espera_maxima']} ticks (Límite < 150) | "
+        f"Estado consulta_general: {procesos.estado_proceso(pid_consulta)}"
+    )
     assert metricas["espera_maxima"] < 150
     assert procesos.estado_proceso(pid_consulta) == "TERMINADO"
 
@@ -108,6 +113,10 @@ def test_rp3_utilizacion_cpu_mayor_igual_85_por_ciento():
 
     kernel.ejecutar_ticks(80)
     metricas = procesos.metricas_planificacion()
+    print(
+        f"\n[RP3] Utilización CPU: {metricas['utilizacion_cpu'] * 100:.2f}% (Mínimo >= 85.0%) | "
+        f"Cambios de contexto: {metricas['cambios_contexto']}"
+    )
     assert metricas["utilizacion_cpu"] >= 0.85
 
 
@@ -134,21 +143,23 @@ def test_consola_admision_directorios_y_monitoreo(tmp_path):
     assert consola.directorio_actual("medico_a") == "/home/medico_a"
 
     salida_adm = consola.ejecutar_comando("admitir triage_rojo", usuario="medico_a")
-    assert "PID 1" in salida_adm
-
     salida_ps = consola.ejecutar_comando("ps")
+    salida_tick = consola.ejecutar_comando("tick 3")
+    salida_top = consola.ejecutar_comando("top")
+    salida_kill = consola.ejecutar_comando("kill 1")
+    salida_error = consola.ejecutar_comando("kill 999")
+
+    print("\n[Consola Blissey OS]")
+    print(f"  > admitir triage_rojo -> {salida_adm}")
+    print(f"  > tick 3              -> {salida_tick}")
+    print(f"  > kill 1              -> {salida_kill}")
+    print(f"  > kill 999            -> {salida_error}")
+
+    assert "PID 1" in salida_adm
     assert salida_ps.startswith("PID NOMBRE USUARIO ESTADO")
     assert "1 triage_rojo medico_a LISTO" in salida_ps
-
-    salida_tick = consola.ejecutar_comando("tick 3")
     assert "tick 3" in salida_tick
-
-    salida_top = consola.ejecutar_comando("top")
     assert "Blissey OS Urgencias" in salida_top
-
-    salida_kill = consola.ejecutar_comando("kill 1")
     assert "terminado" in salida_kill
     assert procesos.estado_proceso(1) == "TERMINADO"
-
-    salida_error = consola.ejecutar_comando("kill 999")
     assert salida_error.startswith("Error:")

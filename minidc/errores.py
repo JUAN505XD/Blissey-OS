@@ -1,8 +1,8 @@
-"""Jerarquía de excepciones del sistema operativo simulado NimbusDC."""
+"""Jerarquía de excepciones del sistema operativo simulado Blissey OS."""
 
 
 class ErrorSistema(Exception):
-    """Excepción base para todos los errores controlados de NimbusDC."""
+    """Excepción base para todos los errores controlados de Blissey OS."""
 
 
 class ErrorPermiso(ErrorSistema):

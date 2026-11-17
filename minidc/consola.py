@@ -55,7 +55,7 @@ def _formatear_top() -> str:
         f"En atención/espera: {res['procesos_activos']} | "
         f"Atendidos (alta): {met['procesos_terminados']} | "
         f"Utilización CPU: {met['utilizacion_cpu'] * 100:.1f}% | "
-        f"Respuesta prom: {met['respuesta_promedio']:.2f} | "
+        f"Respuesta web prom: {met['respuesta_promedio_web']:.2f} | "
         f"Espera máx: {met['espera_maxima']}"
     )
     return f"{encabezado}\n{_formatear_ps()}"
@@ -79,10 +79,25 @@ def ejecutar_comando(linea: str, usuario: str = "admin") -> str:
             return _formatear_ps()
 
         if cmd in ("run", "admitir"):
-            if len(args) != 1:
-                raise ErrorSistema(f"Uso: {cmd} NOMBRE")
-            pid = kernel.ejecutar_desde_catalogo(args[0], usuario=usuario)
-            return f"Admisión '{args[0]}' registrada con PID {pid}."
+            if len(args) == 1:
+                pid = kernel.ejecutar_desde_catalogo(args[0], usuario=usuario)
+                return f"Admisión '{args[0]}' registrada con PID {pid}."
+            if len(args) in (2, 3):
+                try:
+                    rafaga = int(args[1])
+                    prioridad = int(args[2]) if len(args) == 3 else 1
+                except ValueError as exc:
+                    raise ErrorSistema(f"Parámetros numéricos inválidos en {cmd}.") from exc
+                if rafaga <= 0:
+                    raise ErrorSistema("La ráfaga de CPU debe ser mayor que 0.")
+                pid = procesos.crear_proceso(
+                    nombre=args[0],
+                    usuario=usuario,
+                    programa=[["CPU", rafaga]],
+                    prioridad=prioridad,
+                )
+                return f"Proceso '{args[0]}' creado con PID {pid}."
+            raise ErrorSistema(f"Uso: {cmd} NOMBRE [RAFAGA_CPU] [PRIORIDAD]")
 
         if cmd in ("kill", "taskkill"):
             if len(args) != 1:

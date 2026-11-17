@@ -90,12 +90,16 @@ def _obtener_pcb(pid: int) -> dict:
 
 
 def _cambiar_estado(pcb: dict, nuevo_estado: str) -> None:
-    """Centraliza las transiciones de estado del proceso (regla de aislamiento Aurora OS)."""
+    """Centraliza las transiciones de estado del proceso (regla de aislamiento Blissey OS)."""
     if nuevo_estado not in ESTADOS_VALIDOS:
         raise ErrorSistema(f"Estado de proceso inválido: {nuevo_estado}")
     estado_anterior = pcb["estado"]
     if estado_anterior == nuevo_estado:
         return
+    if estado_anterior == "TERMINADO":
+        raise ErrorSistema(
+            f"El proceso PID {pcb['pid']} ya está TERMINADO y no puede cambiar de estado."
+        )
 
     pid = pcb["pid"]
     if estado_anterior == "LISTO" and pid in _cola_listos:
@@ -199,10 +203,7 @@ def terminar_proceso(pid: int) -> None:
         if cpu_pid == pid:
             _cpus[idx] = None
 
-    if pid in _cola_listos:
-        _cola_listos.remove(pid)
-
-    pcb["estado"] = "TERMINADO"
+    _cambiar_estado(pcb, "TERMINADO")
     pcb["tick_fin"] = _reloj_ref
     pcb["bloqueo_restante"] = 0
     pcb["motivo_bloqueo"] = None
@@ -283,8 +284,9 @@ def planificar_cpus(reloj: int) -> None:
     _reloj_ref = reloj
 
     _ordenar_cola_listos()
+    candidatos_evaluados = 0
 
-    # Evaluar apropiación en CPUs activas
+    # Evaluar apropiación en CPUs activas sin desalojar más CPUs que candidatos disponibles
     for cpu_idx in range(len(_cpus)):
         pid_actual = _cpus[cpu_idx]
         if pid_actual is None:
@@ -295,8 +297,8 @@ def planificar_cpus(reloj: int) -> None:
             _cpus[cpu_idx] = None
             continue
 
-        if _cola_listos:
-            mejor_candidato = _cola_listos[0]
+        if candidatos_evaluados < len(_cola_listos):
+            mejor_candidato = _cola_listos[candidatos_evaluados]
             clave_candidato = _clave_planificacion(mejor_candidato)
             clave_actual = _clave_planificacion(pid_actual)
 
@@ -306,6 +308,7 @@ def planificar_cpus(reloj: int) -> None:
             ):
                 _cpus[cpu_idx] = None
                 _cambiar_estado(pcb_actual, "LISTO")
+                candidatos_evaluados += 1
 
     # Despachar procesos a CPUs disponibles
     _ordenar_cola_listos()
@@ -420,6 +423,7 @@ def metricas_planificacion() -> dict:
         return {
             "espera_promedio": 0.0,
             "respuesta_promedio": 0.0,
+            "respuesta_promedio_web": 0.0,
             "retorno_promedio": 0.0,
             "espera_maxima": 0,
             "utilizacion_cpu": 0.0,
@@ -435,11 +439,24 @@ def metricas_planificacion() -> dict:
     )
 
     respuestas = [
-        p["primera_ejecucion"] - p["tick_llegada"]
+        (p["primera_ejecucion"] if p["primera_ejecucion"] is not None else _reloj_ref)
+        - p["tick_llegada"]
         for p in _procesos.values()
-        if p["primera_ejecucion"] is not None
     ]
     respuesta_promedio = sum(respuestas) / len(respuestas) if respuestas else 0.0
+
+    # Métrica específica RP1: servicios web
+    respuestas_web = [
+        (p["primera_ejecucion"] if p["primera_ejecucion"] is not None else _reloj_ref)
+        - p["tick_llegada"]
+        for p in _procesos.values()
+        if "web" in p["nombre"].lower()
+    ]
+    respuesta_promedio_web = (
+        sum(respuestas_web) / len(respuestas_web)
+        if respuestas_web
+        else respuesta_promedio
+    )
 
     terminados = [p for p in _procesos.values() if p["estado"] == "TERMINADO"]
     retornos = [
@@ -455,6 +472,7 @@ def metricas_planificacion() -> dict:
     return {
         "espera_promedio": round(espera_promedio, 4),
         "respuesta_promedio": round(respuesta_promedio, 4),
+        "respuesta_promedio_web": round(respuesta_promedio_web, 4),
         "retorno_promedio": round(retorno_promedio, 4),
         "espera_maxima": espera_maxima,
         "utilizacion_cpu": round(utilizacion_cpu, 4),

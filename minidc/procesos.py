@@ -1,10 +1,10 @@
-"""Gestión de procesos (pacientes/atenciones), hilos y planificación por urgencia de Blissey OS."""
+"""Gestión de procesos, hilos múltiples y planificación por urgencia de Blissey OS (Prototipo 2)."""
 
 from __future__ import annotations
 
 from typing import Optional
 
-from .errores import ErrorNoExiste, ErrorSistema
+from .errores import ErrorMemoria, ErrorNoExiste, ErrorSistema
 
 ESTADOS_VALIDOS = ("NUEVO", "LISTO", "EJECUTANDO", "BLOQUEADO", "TERMINADO")
 
@@ -47,7 +47,7 @@ def _sincronizar_reloj(reloj: int) -> None:
 
 
 def _normalizar_programa(programa: list) -> list[tuple]:
-    """Convierte las instrucciones del protocolo de atención a tuplas normalizadas."""
+    """Convierte las instrucciones del programa a una lista de tuplas normalizadas."""
     resultado = []
     for inst in programa:
         if not isinstance(inst, (list, tuple)) or len(inst) < 2:
@@ -63,8 +63,20 @@ def _normalizar_programa(programa: list) -> list[tuple]:
     return resultado
 
 
+def _crear_estructura_hilo(tid: int, programa: list) -> dict:
+    prog_norm = _normalizar_programa(programa)
+    inst_restante = prog_norm[0][1] if prog_norm and prog_norm[0][0] == "CPU" else 0
+    return {
+        "tid": tid,
+        "programa": prog_norm,
+        "ip": 0,
+        "inst_restante": inst_restante,
+        "estado": "LISTO" if prog_norm else "TERMINADO",
+    }
+
+
 def _clave_planificacion(pid: int) -> tuple:
-    """Calcula la prioridad efectiva considerando nivel de urgencia (triage) y envejecimiento."""
+    """Calcula la prioridad efectiva considerando urgencia (triage) y envejecimiento."""
     pcb = _procesos[pid]
     emergencia = 0 if pcb["espera_consecutiva"] >= _UMBRAL_EMERGENCIA_INANICION else 1
     prio_efectiva = pcb["prioridad"] + pcb["bono_envejecimiento"]
@@ -79,27 +91,23 @@ def _clave_planificacion(pid: int) -> tuple:
 
 
 def _ordenar_cola_listos() -> None:
-    """Ordena la sala de espera (cola de listos) según urgencia efectiva."""
+    """Ordena la cola de listos según urgencia efectiva."""
     _cola_listos.sort(key=_clave_planificacion)
 
 
 def _obtener_pcb(pid: int) -> dict:
     if pid not in _procesos:
-        raise ErrorNoExiste(f"El proceso/paciente con PID {pid} no existe.")
+        raise ErrorNoExiste(f"El proceso con PID {pid} no existe.")
     return _procesos[pid]
 
 
 def _cambiar_estado(pcb: dict, nuevo_estado: str) -> None:
-    """Centraliza las transiciones de estado del proceso (regla de aislamiento Blissey OS)."""
+    """Centraliza las transiciones de estado del proceso."""
     if nuevo_estado not in ESTADOS_VALIDOS:
         raise ErrorSistema(f"Estado de proceso inválido: {nuevo_estado}")
     estado_anterior = pcb["estado"]
     if estado_anterior == nuevo_estado:
         return
-    if estado_anterior == "TERMINADO":
-        raise ErrorSistema(
-            f"El proceso PID {pcb['pid']} ya está TERMINADO y no puede cambiar de estado."
-        )
 
     pid = pcb["pid"]
     if estado_anterior == "LISTO" and pid in _cola_listos:
@@ -126,7 +134,7 @@ def crear_proceso(
     cuota_marcos: int = 4,
     prioridad: int = 0,
 ) -> int:
-    """Registra un nuevo proceso/paciente en el sistema y lo ingresa a la cola LISTO."""
+    """Crea un nuevo proceso con su hilo principal y lo pasa a estado LISTO."""
     global _siguiente_pid, _siguiente_tid
 
     pid = _siguiente_pid
@@ -135,16 +143,12 @@ def crear_proceso(
     tid_principal = _siguiente_tid
     _siguiente_tid += 1
 
-    prog_norm = _normalizar_programa(programa)
-    inst_restante = prog_norm[0][1] if prog_norm and prog_norm[0][0] == "CPU" else 0
+    hilo_principal = _crear_estructura_hilo(tid_principal, programa)
 
     pcb = {
         "pid": pid,
         "nombre": str(nombre),
         "usuario": str(usuario),
-        "programa": prog_norm,
-        "ip": 0,
-        "inst_restante": inst_restante,
         "memoria_bytes": int(memoria_bytes),
         "cuota_marcos": int(cuota_marcos),
         "prioridad": int(prioridad),
@@ -160,15 +164,20 @@ def crear_proceso(
         "quantum_usado": 0,
         "bloqueo_restante": 0,
         "motivo_bloqueo": None,
-        "hilos": [{"tid": tid_principal, "estado": "LISTO"}],
+        "hilos": [hilo_principal],
+        "indice_hilo_actual": 0,
     }
     _procesos[pid] = pcb
-    _cambiar_estado(pcb, "LISTO")
+
+    if all(h["estado"] == "TERMINADO" for h in pcb["hilos"]):
+        terminar_proceso(pid)
+    else:
+        _cambiar_estado(pcb, "LISTO")
     return pid
 
 
 def crear_hilo(pid: int, programa: list) -> int:
-    """Crea un hilo de actividad clínica asociado a un proceso existente."""
+    """Crea un hilo adicional dentro de un proceso existente y devuelve su TID."""
     global _siguiente_tid
     pcb = _obtener_pcb(pid)
     if pcb["estado"] == "TERMINADO":
@@ -176,17 +185,16 @@ def crear_hilo(pid: int, programa: list) -> int:
 
     tid = _siguiente_tid
     _siguiente_tid += 1
-    prog_hilo = _normalizar_programa(programa)
-    pcb["hilos"].append({"tid": tid, "programa": prog_hilo, "estado": "LISTO"})
-    pcb["programa"].extend(prog_hilo)
-    if pcb["ip"] < len(pcb["programa"]) and pcb["inst_restante"] == 0:
-        if pcb["programa"][pcb["ip"]][0] == "CPU":
-            pcb["inst_restante"] = pcb["programa"][pcb["ip"]][1]
+    nuevo_hilo = _crear_estructura_hilo(tid, programa)
+    pcb["hilos"].append(nuevo_hilo)
+
+    if pcb["estado"] == "BLOQUEADO" and pcb["motivo_bloqueo"] is None and nuevo_hilo["estado"] == "LISTO":
+        _cambiar_estado(pcb, "LISTO")
     return tid
 
 
 def _liberar_recursos_proceso(pid: int) -> None:
-    """Libera memoria y semáforos/mutex asignados al proceso al finalizar."""
+    """Libera memoria y recursos de sincronización asociados al proceso al terminar."""
     from . import memoria, sincronizacion
 
     memoria.liberar_memoria(pid)
@@ -194,7 +202,7 @@ def _liberar_recursos_proceso(pid: int) -> None:
 
 
 def terminar_proceso(pid: int) -> None:
-    """Finaliza un proceso (alta médica o cancelación) y libera sus recursos."""
+    """Finaliza un proceso y todos sus hilos, liberando memoria y semáforos."""
     pcb = _obtener_pcb(pid)
     if pcb["estado"] == "TERMINADO":
         return
@@ -203,7 +211,10 @@ def terminar_proceso(pid: int) -> None:
         if cpu_pid == pid:
             _cpus[idx] = None
 
-    _cambiar_estado(pcb, "TERMINADO")
+    if pid in _cola_listos:
+        _cola_listos.remove(pid)
+
+    pcb["estado"] = "TERMINADO"
     pcb["tick_fin"] = _reloj_ref
     pcb["bloqueo_restante"] = 0
     pcb["motivo_bloqueo"] = None
@@ -213,8 +224,8 @@ def terminar_proceso(pid: int) -> None:
     _liberar_recursos_proceso(pid)
 
 
-def bloquear_proceso(pid: int, ticks_bloqueo: int, motivo: str = "ES") -> None:
-    """Pasa un proceso a estado BLOQUEADO por exámenes de E/S o fallo de página."""
+def bloquear_proceso(pid: int, ticks_bloqueo: int = 0, motivo: str = "ES") -> None:
+    """Pasa un proceso a estado BLOQUEADO por E/S de disco, fallo de página o sincronización."""
     pcb = _obtener_pcb(pid)
     if pcb["estado"] == "TERMINADO":
         return
@@ -223,22 +234,27 @@ def bloquear_proceso(pid: int, ticks_bloqueo: int, motivo: str = "ES") -> None:
         if cpu_pid == pid:
             _cpus[idx] = None
 
-    pcb["bloqueo_restante"] = max(1, int(ticks_bloqueo))
+    pcb["bloqueo_restante"] = max(0, int(ticks_bloqueo))
     pcb["motivo_bloqueo"] = motivo
     _cambiar_estado(pcb, "BLOQUEADO")
 
 
 def despertar_proceso(pid: int) -> None:
     """Reincorpora un proceso BLOQUEADO a la cola de LISTO."""
-    pcb = _obtener_pcb(pid)
+    if pid not in _procesos:
+        return
+    pcb = _procesos[pid]
     if pcb["estado"] == "BLOQUEADO":
         pcb["bloqueo_restante"] = 0
         pcb["motivo_bloqueo"] = None
+        for hilo in pcb["hilos"]:
+            if hilo["estado"] == "BLOQUEADO":
+                hilo["estado"] = "LISTO"
         _cambiar_estado(pcb, "LISTO")
 
 
 def procesar_interrupciones_bloqueo() -> None:
-    """Paso 3 del ciclo: descuenta tiempos de bloqueo y despierta procesos listos."""
+    """Actualiza temporizadores de bloqueo por fallo de página (5 ticks) y despierta procesos."""
     for pcb in list(_procesos.values()):
         if pcb["estado"] == "BLOQUEADO" and pcb["bloqueo_restante"] > 0:
             pcb["bloqueo_restante"] -= 1
@@ -246,47 +262,68 @@ def procesar_interrupciones_bloqueo() -> None:
                 despertar_proceso(pcb["pid"])
 
 
-def _preparar_siguiente_instruccion(pcb: dict, reloj: int) -> None:
-    """Prepara la siguiente instrucción del proceso o inicia bloqueo por E/S o memoria."""
+def _seleccionar_hilo_ejecutable(pcb: dict) -> Optional[dict]:
+    """Selecciona el siguiente hilo listo del proceso en orden circular (Round-Robin interno)."""
+    hilos = pcb["hilos"]
+    total = len(hilos)
+    inicio = pcb["indice_hilo_actual"] % total
+    for offset in range(total):
+        idx = (inicio + offset) % total
+        hilo = hilos[idx]
+        if hilo["estado"] == "LISTO":
+            pcb["indice_hilo_actual"] = (idx + 1) % total
+            return hilo
+    return None
+
+
+def _avanzar_instrucciones_hilo(pcb: dict, hilo: dict) -> None:
+    """Ejecuta instrucciones no bloqueantes del hilo o inicia bloqueo por E/S o fallo de página."""
     from . import disco, memoria
 
-    while pcb["estado"] != "TERMINADO" and pcb["ip"] < len(pcb["programa"]):
-        op, arg = pcb["programa"][pcb["ip"]]
+    while pcb["estado"] != "TERMINADO" and hilo["ip"] < len(hilo["programa"]):
+        op, arg = hilo["programa"][hilo["ip"]]
         if op == "CPU":
-            if pcb["inst_restante"] <= 0:
-                pcb["inst_restante"] = int(arg)
-            if pcb["inst_restante"] > 0:
+            if hilo["inst_restante"] <= 0:
+                hilo["inst_restante"] = int(arg)
+            if hilo["inst_restante"] > 0:
                 return
-            pcb["ip"] += 1
+            hilo["ip"] += 1
         elif op == "ES":
-            pcb["ip"] += 1
-            ticks_es = disco._registrar_es_kernel(pcb["pid"], int(arg))
-            bloquear_proceso(pcb["pid"], ticks_es, motivo="ES")
+            hilo["ip"] += 1
+            hilo["estado"] = "BLOQUEADO"
+            disco.encolar_solicitud_disco(pcb["pid"], int(arg), "L")
+            bloquear_proceso(pcb["pid"], ticks_bloqueo=0, motivo="ES")
             return
         elif op == "MEM":
-            pcb["ip"] += 1
-            res = memoria.acceder_memoria(pcb["pid"], int(arg))
+            hilo["ip"] += 1
+            try:
+                res = memoria.acceder_memoria(pcb["pid"], int(arg))
+            except ErrorMemoria:
+                terminar_proceso(pcb["pid"])
+                return
             if res.get("fallo_pagina", False):
-                bloquear_proceso(pcb["pid"], 5, motivo="MEM")
+                hilo["estado"] = "BLOQUEADO"
+                bloquear_proceso(pcb["pid"], ticks_bloqueo=5, motivo="MEM")
                 return
         elif op in ("WAIT", "SIGNAL"):
-            pcb["ip"] += 1
+            hilo["ip"] += 1
         else:
-            pcb["ip"] += 1
+            hilo["ip"] += 1
 
-    if pcb["ip"] >= len(pcb["programa"]) and pcb["estado"] != "TERMINADO":
+    if hilo["ip"] >= len(hilo["programa"]):
+        hilo["estado"] = "TERMINADO"
+
+    if all(h["estado"] == "TERMINADO" for h in pcb["hilos"]) and pcb["estado"] != "TERMINADO":
         terminar_proceso(pcb["pid"])
 
 
 def planificar_cpus(reloj: int) -> None:
-    """Paso 4 del ciclo: evalúa apropiación por urgencia/quantum y asigna CPUs libres."""
+    """Evalúa apropiación por urgencia/quantum y asigna procesos a las CPUs libres."""
     global _cambios_contexto, _reloj_ref
     _reloj_ref = reloj
 
     _ordenar_cola_listos()
-    candidatos_evaluados = 0
 
-    # Evaluar apropiación en CPUs activas sin desalojar más CPUs que candidatos disponibles
     for cpu_idx in range(len(_cpus)):
         pid_actual = _cpus[cpu_idx]
         if pid_actual is None:
@@ -297,8 +334,8 @@ def planificar_cpus(reloj: int) -> None:
             _cpus[cpu_idx] = None
             continue
 
-        if candidatos_evaluados < len(_cola_listos):
-            mejor_candidato = _cola_listos[candidatos_evaluados]
+        if _cola_listos:
+            mejor_candidato = _cola_listos[0]
             clave_candidato = _clave_planificacion(mejor_candidato)
             clave_actual = _clave_planificacion(pid_actual)
 
@@ -308,9 +345,7 @@ def planificar_cpus(reloj: int) -> None:
             ):
                 _cpus[cpu_idx] = None
                 _cambiar_estado(pcb_actual, "LISTO")
-                candidatos_evaluados += 1
 
-    # Despachar procesos a CPUs disponibles
     _ordenar_cola_listos()
     for cpu_idx in range(len(_cpus)):
         if _cpus[cpu_idx] is None and _cola_listos:
@@ -324,7 +359,7 @@ def planificar_cpus(reloj: int) -> None:
 
 
 def ejecutar_instrucciones_cpus(reloj: int) -> None:
-    """Paso 5 del ciclo: ejecuta 1 tick de CPU en cada unidad asignada."""
+    """Ejecuta 1 tick en cada CPU asignada avanzando el hilo activo del proceso."""
     global _ticks_cpu_ocupados, _reloj_ref
     _reloj_ref = reloj
 
@@ -334,28 +369,29 @@ def ejecutar_instrucciones_cpus(reloj: int) -> None:
             continue
 
         pcb = _procesos[pid]
+        hilo = _seleccionar_hilo_ejecutable(pcb)
+        if hilo is None:
+            terminar_proceso(pid)
+            continue
+
         _ticks_cpu_ocupados += 1
         pcb["cpu_usada"] += 1
         pcb["quantum_usado"] += 1
 
-        if pcb["ip"] >= len(pcb["programa"]):
-            terminar_proceso(pid)
-            continue
-
-        op, arg = pcb["programa"][pcb["ip"]]
+        op, arg = hilo["programa"][hilo["ip"]]
         if op == "CPU":
-            if pcb["inst_restante"] <= 0:
-                pcb["inst_restante"] = int(arg)
-            pcb["inst_restante"] -= 1
-            if pcb["inst_restante"] <= 0:
-                pcb["ip"] += 1
-                _preparar_siguiente_instruccion(pcb, reloj)
+            if hilo["inst_restante"] <= 0:
+                hilo["inst_restante"] = int(arg)
+            hilo["inst_restante"] -= 1
+            if hilo["inst_restante"] <= 0:
+                hilo["ip"] += 1
+                _avanzar_instrucciones_hilo(pcb, hilo)
         else:
-            _preparar_siguiente_instruccion(pcb, reloj)
+            _avanzar_instrucciones_hilo(pcb, hilo)
 
 
 def aplicar_vigilancia() -> None:
-    """Paso 6 del ciclo: actualiza espera en sala y aplica envejecimiento contra inanición."""
+    """Actualiza espera en cola y aplica envejecimiento contra inanición."""
     for pid in list(_cola_listos):
         pcb = _procesos[pid]
         pcb["tiempo_espera"] += 1
@@ -368,7 +404,7 @@ def aplicar_vigilancia() -> None:
 
 
 def ejecutar_ciclo_cpus(reloj: int) -> None:
-    """Método de compatibilidad que agrupa planificación, ejecución y vigilancia."""
+    """Agrupa planificación, ejecución y vigilancia."""
     planificar_cpus(reloj)
     ejecutar_instrucciones_cpus(reloj)
     aplicar_vigilancia()
@@ -412,18 +448,17 @@ def proceso_en_ejecucion(cpu: int = 0) -> Optional[int]:
 
 
 def politica_planificacion() -> str:
-    """Nombre descriptivo de la política de planificación hospitalaria implementada."""
+    """Nombre descriptivo de la política de planificación implementada."""
     return "Triage Apropiativo con Quantum (Q=3) y Envejecimiento"
 
 
 def metricas_planificacion() -> dict:
-    """Paso 7 del ciclo: calcula los indicadores de atención y utilización del sistema."""
+    """Calcula los indicadores de atención y utilización del sistema."""
     total_procesos = len(_procesos)
     if total_procesos == 0:
         return {
             "espera_promedio": 0.0,
             "respuesta_promedio": 0.0,
-            "respuesta_promedio_web": 0.0,
             "retorno_promedio": 0.0,
             "espera_maxima": 0,
             "utilizacion_cpu": 0.0,
@@ -439,24 +474,11 @@ def metricas_planificacion() -> dict:
     )
 
     respuestas = [
-        (p["primera_ejecucion"] if p["primera_ejecucion"] is not None else _reloj_ref)
-        - p["tick_llegada"]
+        p["primera_ejecucion"] - p["tick_llegada"]
         for p in _procesos.values()
+        if p["primera_ejecucion"] is not None
     ]
     respuesta_promedio = sum(respuestas) / len(respuestas) if respuestas else 0.0
-
-    # Métrica específica RP1: servicios web
-    respuestas_web = [
-        (p["primera_ejecucion"] if p["primera_ejecucion"] is not None else _reloj_ref)
-        - p["tick_llegada"]
-        for p in _procesos.values()
-        if "web" in p["nombre"].lower()
-    ]
-    respuesta_promedio_web = (
-        sum(respuestas_web) / len(respuestas_web)
-        if respuestas_web
-        else respuesta_promedio
-    )
 
     terminados = [p for p in _procesos.values() if p["estado"] == "TERMINADO"]
     retornos = [
@@ -472,7 +494,6 @@ def metricas_planificacion() -> dict:
     return {
         "espera_promedio": round(espera_promedio, 4),
         "respuesta_promedio": round(respuesta_promedio, 4),
-        "respuesta_promedio_web": round(respuesta_promedio_web, 4),
         "retorno_promedio": round(retorno_promedio, 4),
         "espera_maxima": espera_maxima,
         "utilizacion_cpu": round(utilizacion_cpu, 4),
@@ -482,5 +503,5 @@ def metricas_planificacion() -> dict:
 
 
 def _contar_activos() -> int:
-    """Cantidad de procesos/pacientes activos en el hospital."""
+    """Cantidad de procesos activos en el sistema."""
     return sum(1 for p in _procesos.values() if p["estado"] != "TERMINADO")

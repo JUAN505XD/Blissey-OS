@@ -1,4 +1,4 @@
-"""Núcleo y reloj discreto de Blissey OS (Gestión de Urgencias Hospitalarias)."""
+"""Núcleo y reloj discreto de Blissey OS (Integración Prototipo 2)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from . import archivos, consola, disco, memoria, procesos, sincronizacion
-from .errores import ErrorNoExiste, ErrorSistema
+from .errores import ErrorNoExiste, ErrorSistema, ErrorYaExiste
 
 _CONFIG_DEFECTO = {
     "num_cpus": 1,
@@ -26,7 +26,7 @@ _ultimo_resumen_metricas: dict = {}
 
 
 def iniciar_sistema(config: dict) -> None:
-    """Inicializa o reinicia por completo todos los módulos del hospital simulado."""
+    """Inicializa o reinicia por completo todos los módulos del sistema."""
     global _reloj, _config_actual, _catalogo_escenario, _llegadas_programadas
     global _sistema_iniciado, _ultimo_resumen_metricas
 
@@ -51,13 +51,16 @@ def iniciar_sistema(config: dict) -> None:
         tam_bloque=int(cfg["tam_bloque"]),
         cache_bloques=int(cfg["cache_bloques"]),
     )
-    archivos._reiniciar_modulo(bloques_disco=int(cfg["bloques_disco"]))
+    archivos._reiniciar_modulo(
+        bloques_disco=int(cfg["bloques_disco"]),
+        tam_bloque=int(cfg["tam_bloque"]),
+    )
     sincronizacion._reiniciar_modulo()
     consola._reiniciar_modulo()
 
 
 def _procesar_llegadas_hasta(tick_objetivo: int) -> None:
-    """Admite los pacientes/procesos programados cuya llegada sea <= tick_objetivo."""
+    """Admite los procesos programados cuya llegada sea <= tick_objetivo."""
     tickets_pendientes = [t for t in sorted(_llegadas_programadas.keys()) if t <= tick_objetivo]
     for t in tickets_pendientes:
         eventos = _llegadas_programadas.pop(t)
@@ -68,9 +71,9 @@ def _procesar_llegadas_hasta(tick_objetivo: int) -> None:
 
 
 def ejecutar_desde_catalogo(nombre_programa: str, usuario: str = "admin") -> int:
-    """Admite un nuevo paciente/proceso tomando su protocolo del catálogo del escenario."""
+    """Admite un nuevo proceso tomando su definición del catálogo del escenario."""
     if nombre_programa not in _catalogo_escenario:
-        raise ErrorNoExiste(f"El protocolo de atención '{nombre_programa}' no existe en el catálogo.")
+        raise ErrorNoExiste(f"El programa '{nombre_programa}' no existe en el catálogo.")
 
     spec = _catalogo_escenario[nombre_programa]
     memoria_bytes = int(spec.get("memoria_bytes", spec.get("memoria bytes", 4096)))
@@ -89,7 +92,7 @@ def ejecutar_desde_catalogo(nombre_programa: str, usuario: str = "admin") -> int
 
 
 def cargar_escenario(ruta_json: str) -> None:
-    """Carga un escenario hospitalario desde JSON, inicia el sistema y programa ingresos."""
+    """Carga un escenario desde JSON, inicia el sistema y programa las llegadas."""
     global _catalogo_escenario, _llegadas_programadas
 
     ruta = Path(ruta_json)
@@ -101,9 +104,27 @@ def cargar_escenario(ruta_json: str) -> None:
 
     iniciar_sistema(datos.get("config", {}))
 
-    for usuario in datos.get("usuarios", []):
+    usuarios = datos.get("usuarios", [])
+    if usuarios:
+        try:
+            archivos.fs_mkdir("/home", "admin")
+        except ErrorYaExiste:
+            pass
+
+    for usuario in usuarios:
         if usuario != "admin":
-            archivos.crear_usuario(usuario)
+            try:
+                archivos.crear_usuario(usuario)
+            except ErrorYaExiste:
+                pass
+            home_usuario = f"/home/{usuario}"
+            try:
+                archivos.fs_mkdir(home_usuario, "admin")
+                nodo_home, _, _ = archivos._buscar_nodo(home_usuario, seguir_ultimo_enlace=False)
+                nodo_home["propietario"] = usuario
+                nodo_home["grupo"] = archivos._usuarios[usuario]
+            except ErrorYaExiste:
+                pass
             consola._registrar_directorio_usuario(usuario)
 
     for nombre_sem, valor in datos.get("semaforos", {}).items():
@@ -119,7 +140,7 @@ def cargar_escenario(ruta_json: str) -> None:
 
 
 def tick() -> None:
-    """Ejecuta el ciclo determinista de 7 pasos de Aurora / Blissey OS."""
+    """Ejecuta el ciclo determinista de 7 pasos de Blissey OS."""
     global _reloj, _ultimo_resumen_metricas
 
     if not _sistema_iniciado:
@@ -128,24 +149,26 @@ def tick() -> None:
     # Paso 1. Reloj: avanza una unidad de tiempo
     _reloj += 1
     procesos._sincronizar_reloj(_reloj)
+    disco._sincronizar_reloj(_reloj)
 
-    # Paso 2. Llegadas: incorpora los nuevos pacientes/procesos programados
+    # Paso 2. Llegadas: incorpora los nuevos procesos programados
     _procesar_llegadas_hasta(_reloj)
 
-    # Paso 3. E/S terminada: completa solicitudes de disco/memoria y despierta bloqueados
+    # Paso 3. E/S terminada: avanza disco y despierta procesos bloqueados por E/S o página
+    disco.avanzar_tick_disco(_reloj)
     procesos.procesar_interrupciones_bloqueo()
 
-    # Paso 4. Planificador: selecciona y despacha el siguiente proceso según urgencia
+    # Paso 4. Planificador: selecciona y despacha procesos según urgencia
     procesos.planificar_cpus(_reloj)
 
-    # Paso 5. Ejecución: ejecuta 1 tick de CPU, E/S o acceso a memoria
+    # Paso 5. Ejecución: ejecuta 1 tick por cada CPU
     procesos.ejecutar_instrucciones_cpus(_reloj)
 
-    # Paso 6. Vigilancia: detecta interbloqueos y aplica envejecimiento de prioridades
+    # Paso 6. Vigilancia: detecta interbloqueos y aplica envejecimiento
     sincronizacion.detectar_interbloqueo()
     procesos.aplicar_vigilancia()
 
-    # Paso 7. Métricas: actualiza los tiempos, contadores e indicadores del sistema
+    # Paso 7. Métricas: actualiza los indicadores del sistema
     _ultimo_resumen_metricas = procesos.metricas_planificacion()
 
 
@@ -163,7 +186,7 @@ def reloj_actual() -> int:
 
 
 def resumen_sistema() -> dict:
-    """Devuelve un resumen instantáneo del estado de urgencias y recursos del sistema."""
+    """Devuelve un resumen instantáneo del estado global del servidor."""
     estado_mem = memoria.estado_memoria()
     estado_fs = archivos.fs_estado_disco()
     return {
@@ -175,9 +198,11 @@ def resumen_sistema() -> dict:
 
 
 def apagar_sistema() -> dict:
-    """Genera el resumen final de la jornada y detiene la simulación activa."""
+    """Genera el resumen final de ejecución y detiene la simulación activa."""
     global _sistema_iniciado
     resumen = resumen_sistema()
     resumen["metricas_planificacion"] = procesos.metricas_planificacion()
+    resumen["metricas_memoria"] = memoria.metricas_memoria()
+    resumen["metricas_disco"] = disco.metricas_disco()
     _sistema_iniciado = False
     return resumen
